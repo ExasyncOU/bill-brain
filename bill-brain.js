@@ -11,6 +11,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 
 // ============================================================
 // CONFIG
@@ -96,13 +97,29 @@ let wsConnection = null;      // WebSocket instance
 let wsReconnectTimer = null;  // Reconnect timer
 let wsLastState = null;       // Last received state from server
 let wsLiveBuilt = false;      // Whether live neurons have been built
-let wsLiveNeuronMeshes = {};  // Separate meshes for live neurons
+let wsLiveNeuronMeshes = {};  // Separate meshes for live neurons (legacy, used for < 1024)
 let wsLiveSynapseMeshes = []; // Live synapse lines
 let wsLiveSynapseGlows = [];  // Live synapse glow sprites
 let wsLiveParticles = [];     // Live energy particles
 let wsDemoHidden = false;     // Whether demo objects are hidden
 const WS_URL = 'ws://localhost:8765/ws/brain';
 const WS_RECONNECT_DELAY = 3000;  // 3 seconds
+
+// ============================================================
+// INSTANCED RENDERING (for 1K+ neurons)
+// ============================================================
+let wsInstancedMesh = null;        // THREE.InstancedMesh for all neurons
+let wsInstancedCount = 0;          // Current neuron count
+let wsInstancedColors = null;      // Float32Array for per-instance colors
+let wsInstancedScales = null;      // Float32Array for per-instance scales
+let wsInstancedNeuronData = [];    // Cached neuron metadata
+let wsSynapseLineSegments = null;  // Single THREE.LineSegments for all synapses
+let wsSynapsePositionBuffer = null;// Float32Array for synapse vertex positions
+let wsSynapseColorBuffer = null;   // Float32Array for synapse vertex colors
+const WS_INSTANCED_THRESHOLD = 512; // Use instanced rendering above this count
+const _tmpMatrix = new THREE.Matrix4();
+const _tmpColor = new THREE.Color();
+const _tmpVec = new THREE.Vector3();
 
 // ============================================================
 // WEBSOCKET CLIENT
@@ -170,63 +187,287 @@ function wsConnect() {
 
 /**
  * Apply live state from PyTorch backend to Three.js scene.
- * On first call: creates 256 live neuron meshes.
- * On subsequent calls: updates positions, activations, synapses.
+ * Automatically chooses instanced rendering for 1K+ neurons.
  */
 function wsApplyState(state) {
   if (!state.neurons || !Array.isArray(state.neurons)) return;
 
+  const useInstanced = state.neurons.length >= WS_INSTANCED_THRESHOLD;
+
   // --- First call: build live neurons ---
   if (!wsLiveBuilt) {
     wsHideDemoObjects();
-    wsBuildLiveNeurons(state);
+    if (useInstanced) {
+      wsBuildInstancedNeurons(state);
+    } else {
+      wsBuildLiveNeurons(state);
+    }
     wsLiveBuilt = true;
-    dbg(`LIVE: ${state.neurons.length} Neuronen, ${(state.synapses||[]).length} Synapsen`);
+    dbg(`LIVE: ${state.neurons.length} neurons (${useInstanced ? 'instanced' : 'mesh'}) | ${(state.synapses||[]).length} synapses`);
   }
 
-  // --- Update neuron positions and heat ---
-  state.neurons.forEach(n => {
-    const mesh = wsLiveNeuronMeshes[n.id];
-    if (!mesh) return;
+  if (useInstanced) {
+    wsUpdateInstancedNeurons(state);
+    wsUpdateInstancedSynapses(state);
+  } else {
+    // --- Legacy per-mesh update for small networks ---
+    state.neurons.forEach(n => {
+      const mesh = wsLiveNeuronMeshes[n.id];
+      if (!mesh) return;
 
-    // Smooth lerp toward target position
-    const target = new THREE.Vector3(n.x, n.y, n.z);
-    if (target.length() > BRAIN_RADIUS) {
-      target.normalize().multiplyScalar(BRAIN_RADIUS);
+      const target = new THREE.Vector3(n.x, n.y, n.z);
+      if (target.length() > BRAIN_RADIUS) {
+        target.normalize().multiplyScalar(BRAIN_RADIUS);
+      }
+      mesh.position.lerp(target, 0.2);
+
+      const hue = REGION_HUES[n.region] || { h: 0.6, s: 0.8, l: 0.5 };
+      const heat = n.heat || 0;
+      mesh.material.color.setHSL(hue.h, hue.s, 0.25 + heat * 0.55);
+      mesh.material.opacity = 0.4 + heat * 0.6;
+      const scale = 0.6 + heat * 0.8;
+      mesh.scale.setScalar(scale);
+
+      const glow = mesh.userData.glowSprite;
+      if (glow) {
+        glow.material.opacity = heat * 0.45;
+        const gs = 0.06 + heat * 0.15;
+        glow.scale.set(gs, gs, 1);
+      }
+      neuronHeat[`live_${n.id}`] = heat * 15;
+    });
+
+    if (state.synapses && Array.isArray(state.synapses)) {
+      wsUpdateLiveSynapses(state);
     }
-    mesh.position.lerp(target, 0.2);
-
-    // Update color based on activation heat
-    const hue = REGION_HUES[n.region] || { h: 0.6, s: 0.8, l: 0.5 };
-    const heat = n.heat || 0;
-    const brightness = 0.25 + heat * 0.55;
-    mesh.material.color.setHSL(hue.h, hue.s, brightness);
-    mesh.material.opacity = 0.4 + heat * 0.6;
-
-    // Scale neurons that are firing (subtle, elegant)
-    const scale = 0.6 + heat * 0.8;
-    mesh.scale.setScalar(scale);
-
-    // Glow sprite intensity (smaller, more focused)
-    const glow = mesh.userData.glowSprite;
-    if (glow) {
-      glow.material.opacity = heat * 0.45;
-      const gs = 0.06 + heat * 0.15;
-      glow.scale.set(gs, gs, 1);
-    }
-
-    neuronHeat[`live_${n.id}`] = heat * 15;
-  });
-
-  // --- Update synapses ---
-  if (state.synapses && Array.isArray(state.synapses)) {
-    wsUpdateLiveSynapses(state);
   }
 
   // --- Update metrics HUD ---
   if (state.metrics) {
     wsUpdateMetricsHUD(state.metrics);
   }
+}
+
+/**
+ * Build instanced neuron mesh for 1K+ neurons (1 draw call).
+ */
+function wsBuildInstancedNeurons(state) {
+  const count = state.neurons.length;
+  wsInstancedCount = count;
+  wsInstancedNeuronData = state.neurons;
+
+  // Sphere geometry shared by all instances (low-poly for performance)
+  const geo = new THREE.SphereGeometry(0.015, 6, 4);
+  const mat = new THREE.MeshBasicMaterial({
+    transparent: true,
+    opacity: 0.85,
+    depthWrite: false,
+  });
+
+  wsInstancedMesh = new THREE.InstancedMesh(geo, mat, count);
+  wsInstancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+  // Per-instance color attribute
+  wsInstancedColors = new Float32Array(count * 3);
+  wsInstancedScales = new Float32Array(count);
+
+  // Initialize positions and colors
+  for (let i = 0; i < count; i++) {
+    const n = state.neurons[i];
+    let px = n.x, py = n.y, pz = n.z;
+    const d = Math.sqrt(px*px + py*py + pz*pz);
+    if (d > BRAIN_RADIUS) {
+      const s = BRAIN_RADIUS / d;
+      px *= s; py *= s; pz *= s;
+    }
+
+    const heat = n.heat || 0;
+    const scale = 0.6 + heat * 0.8;
+    wsInstancedScales[i] = scale;
+
+    _tmpMatrix.makeScale(scale, scale, scale);
+    _tmpMatrix.setPosition(px, py, pz);
+    wsInstancedMesh.setMatrixAt(i, _tmpMatrix);
+
+    const hue = REGION_HUES[n.region] || { h: 0.6, s: 0.8, l: 0.5 };
+    _tmpColor.setHSL(hue.h, hue.s, 0.25 + heat * 0.55);
+    wsInstancedMesh.setColorAt(i, _tmpColor);
+    wsInstancedColors[i*3] = _tmpColor.r;
+    wsInstancedColors[i*3+1] = _tmpColor.g;
+    wsInstancedColors[i*3+2] = _tmpColor.b;
+  }
+
+  wsInstancedMesh.instanceMatrix.needsUpdate = true;
+  wsInstancedMesh.instanceColor.needsUpdate = true;
+  brainGroup.add(wsInstancedMesh);
+
+  // Build initial synapses
+  if (state.synapses && state.synapses.length > 0) {
+    wsBuildInstancedSynapses(state);
+  }
+}
+
+/**
+ * Batch-update all instanced neuron positions and colors (every WS frame).
+ */
+function wsUpdateInstancedNeurons(state) {
+  if (!wsInstancedMesh) return;
+
+  // Build position lookup from previous frame for lerping
+  const neurons = state.neurons;
+  const count = Math.min(neurons.length, wsInstancedCount);
+
+  for (let i = 0; i < count; i++) {
+    const n = neurons[i];
+    let px = n.x, py = n.y, pz = n.z;
+    const d = Math.sqrt(px*px + py*py + pz*pz);
+    if (d > BRAIN_RADIUS) {
+      const s = BRAIN_RADIUS / d;
+      px *= s; py *= s; pz *= s;
+    }
+
+    // Get current position for lerp
+    wsInstancedMesh.getMatrixAt(i, _tmpMatrix);
+    _tmpVec.setFromMatrixPosition(_tmpMatrix);
+    _tmpVec.lerp(new THREE.Vector3(px, py, pz), 0.15);
+
+    const heat = n.heat || 0;
+    const scale = 0.5 + heat * 1.0;
+
+    _tmpMatrix.makeScale(scale, scale, scale);
+    _tmpMatrix.setPosition(_tmpVec.x, _tmpVec.y, _tmpVec.z);
+    wsInstancedMesh.setMatrixAt(i, _tmpMatrix);
+
+    // Color: shift from region hue toward white as heat increases
+    const hue = REGION_HUES[n.region] || { h: 0.6, s: 0.8, l: 0.5 };
+    const h = hue.h + heat * (0.12 - hue.h) * 0.3;
+    const s = hue.s * (1 - heat * 0.5);
+    const l = 0.2 + heat * 0.65;
+    _tmpColor.setHSL(h, s, l);
+    wsInstancedMesh.setColorAt(i, _tmpColor);
+  }
+
+  wsInstancedMesh.instanceMatrix.needsUpdate = true;
+  if (wsInstancedMesh.instanceColor) wsInstancedMesh.instanceColor.needsUpdate = true;
+
+  // Cache neuron data for synapse updates
+  wsInstancedNeuronData = neurons;
+}
+
+/**
+ * Build LineSegments geometry for all synapses (one draw call).
+ */
+function wsBuildInstancedSynapses(state) {
+  const synapses = state.synapses || [];
+  const maxSyn = Math.min(synapses.length, 2000);
+
+  // 2 vertices per line segment, 3 floats per vertex
+  wsSynapsePositionBuffer = new Float32Array(maxSyn * 2 * 3);
+  wsSynapseColorBuffer = new Float32Array(maxSyn * 2 * 3);
+
+  // Build neuron position lookup
+  const posMap = {};
+  state.neurons.forEach(n => {
+    let px = n.x, py = n.y, pz = n.z;
+    const d = Math.sqrt(px*px + py*py + pz*pz);
+    if (d > BRAIN_RADIUS) {
+      const s = BRAIN_RADIUS / d;
+      px *= s; py *= s; pz *= s;
+    }
+    posMap[n.id] = { x: px, y: py, z: pz, region: n.region };
+  });
+
+  let idx = 0;
+  for (let s = 0; s < maxSyn; s++) {
+    const syn = synapses[s];
+    const from = posMap[syn.from];
+    const to = posMap[syn.to];
+    if (!from || !to) continue;
+
+    const w = Math.abs(syn.weight);
+    const hue = REGION_HUES[from.region] || { h: 0.6, s: 0.8, l: 0.5 };
+    const opacity = syn.active ? 0.15 + w * 0.6 : 0.02 + w * 0.12;
+    _tmpColor.setHSL(hue.h, syn.active ? 1.0 : hue.s * 0.5, syn.active ? 0.5 : 0.15 + w * 0.2);
+
+    const i6 = idx * 6;
+    wsSynapsePositionBuffer[i6] = from.x;
+    wsSynapsePositionBuffer[i6+1] = from.y;
+    wsSynapsePositionBuffer[i6+2] = from.z;
+    wsSynapsePositionBuffer[i6+3] = to.x;
+    wsSynapsePositionBuffer[i6+4] = to.y;
+    wsSynapsePositionBuffer[i6+5] = to.z;
+
+    wsSynapseColorBuffer[i6] = _tmpColor.r * opacity;
+    wsSynapseColorBuffer[i6+1] = _tmpColor.g * opacity;
+    wsSynapseColorBuffer[i6+2] = _tmpColor.b * opacity;
+    wsSynapseColorBuffer[i6+3] = _tmpColor.r * opacity;
+    wsSynapseColorBuffer[i6+4] = _tmpColor.g * opacity;
+    wsSynapseColorBuffer[i6+5] = _tmpColor.b * opacity;
+    idx++;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(wsSynapsePositionBuffer, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(wsSynapseColorBuffer, 3));
+  geo.setDrawRange(0, idx * 2);
+
+  const mat = new THREE.LineBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 1.0,
+    depthWrite: false, blending: THREE.AdditiveBlending
+  });
+
+  wsSynapseLineSegments = new THREE.LineSegments(geo, mat);
+  brainGroup.add(wsSynapseLineSegments);
+}
+
+/**
+ * Update synapse positions and colors from live state.
+ */
+function wsUpdateInstancedSynapses(state) {
+  if (!wsSynapseLineSegments || !state.synapses) return;
+
+  const synapses = state.synapses;
+  const maxSyn = Math.min(synapses.length, 2000);
+
+  // Build position lookup from current neuron data
+  const posMap = {};
+  (state.neurons || wsInstancedNeuronData).forEach(n => {
+    let px = n.x, py = n.y, pz = n.z;
+    const d = Math.sqrt(px*px + py*py + pz*pz);
+    if (d > BRAIN_RADIUS) {
+      const s = BRAIN_RADIUS / d;
+      px *= s; py *= s; pz *= s;
+    }
+    posMap[n.id] = { x: px, y: py, z: pz, region: n.region };
+  });
+
+  const posArr = wsSynapseLineSegments.geometry.attributes.position.array;
+  const colArr = wsSynapseLineSegments.geometry.attributes.color.array;
+
+  let idx = 0;
+  for (let s = 0; s < maxSyn; s++) {
+    const syn = synapses[s];
+    const from = posMap[syn.from];
+    const to = posMap[syn.to];
+    if (!from || !to) continue;
+
+    const w = Math.abs(syn.weight);
+    const hue = REGION_HUES[from.region] || { h: 0.6, s: 0.8, l: 0.5 };
+    const opacity = syn.active ? 0.15 + w * 0.6 : 0.02 + w * 0.12;
+    _tmpColor.setHSL(hue.h, syn.active ? 1.0 : hue.s * 0.5, syn.active ? 0.5 : 0.15 + w * 0.2);
+
+    const i6 = idx * 6;
+    posArr[i6] = from.x; posArr[i6+1] = from.y; posArr[i6+2] = from.z;
+    posArr[i6+3] = to.x;  posArr[i6+4] = to.y;  posArr[i6+5] = to.z;
+
+    colArr[i6] = _tmpColor.r * opacity;   colArr[i6+1] = _tmpColor.g * opacity; colArr[i6+2] = _tmpColor.b * opacity;
+    colArr[i6+3] = _tmpColor.r * opacity;  colArr[i6+4] = _tmpColor.g * opacity; colArr[i6+5] = _tmpColor.b * opacity;
+    idx++;
+  }
+
+  wsSynapseLineSegments.geometry.setDrawRange(0, idx * 2);
+  wsSynapseLineSegments.geometry.attributes.position.needsUpdate = true;
+  wsSynapseLineSegments.geometry.attributes.color.needsUpdate = true;
 }
 
 /**
@@ -395,7 +636,7 @@ function wsUpdateMetricsHUD(m) {
   const setEl = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
 
   if (m.train_accuracy) setEl('stat-firerate', `${(m.train_accuracy * 100).toFixed(1)}%`);
-  if (m.epoch) setEl('stat-neurons', `E${m.epoch}`);
+  if (m.epoch) setEl('stat-neurons', `E${m.epoch} | ${wsInstancedCount > 0 ? wsInstancedCount.toLocaleString() : '?'}N`);
   if (m.train_loss) setEl('stat-synapses', `L:${m.train_loss.toFixed(4)}`);
   if (m.positions_drift) setEl('stat-regions', `D:${m.positions_drift.toFixed(3)}`);
 }
@@ -426,10 +667,24 @@ function wsToggleMode() {
       clearTimeout(wsReconnectTimer);
       wsReconnectTimer = null;
     }
-    // Remove live neuron meshes
+    // Remove instanced mesh if present
+    if (wsInstancedMesh) {
+      brainGroup.remove(wsInstancedMesh);
+      wsInstancedMesh.geometry.dispose();
+      wsInstancedMesh.material.dispose();
+      wsInstancedMesh = null;
+    }
+    // Remove instanced synapses
+    if (wsSynapseLineSegments) {
+      brainGroup.remove(wsSynapseLineSegments);
+      wsSynapseLineSegments.geometry.dispose();
+      wsSynapseLineSegments.material.dispose();
+      wsSynapseLineSegments = null;
+    }
+    // Remove legacy live neuron meshes
     Object.values(wsLiveNeuronMeshes).forEach(m => { brainGroup.remove(m); });
     wsLiveNeuronMeshes = {};
-    // Remove live synapse meshes
+    // Remove legacy live synapse meshes
     wsLiveSynapseMeshes.forEach(m => { brainGroup.remove(m); m.geometry.dispose(); m.material.dispose(); });
     wsLiveSynapseGlows.forEach(m => { brainGroup.remove(m); m.material.dispose(); });
     wsLiveParticles.forEach(p => { brainGroup.remove(p); p.material.dispose(); });
@@ -437,6 +692,8 @@ function wsToggleMode() {
     wsLiveSynapseGlows = [];
     wsLiveParticles = [];
     wsLiveBuilt = false;
+    wsInstancedCount = 0;
+    wsInstancedNeuronData = [];
     // Show demo objects again
     wsShowDemoObjects();
     dbg('DEMO MODE: Simulation active');
@@ -545,11 +802,68 @@ async function init() {
     composer.addPass(new RenderPass(scene, camera));
     const bloomPass = new UnrealBloomPass(
       new THREE.Vector2(window.innerWidth, window.innerHeight),
-      0.6,   // strength - refined, not overpowering
-      0.5,   // radius - wider soft spread for organic feel
-      0.75   // threshold - catch more subtle glows
+      0.7,   // strength - slightly stronger for 10K neuron density
+      0.6,   // radius - wider soft spread for organic neural glow
+      0.65   // threshold - catch more subtle glows from sparse neurons
     );
     composer.addPass(bloomPass);
+
+    // Vignette + Film Grain + Chromatic Aberration (cinematic feel)
+    const vignetteShader = {
+      uniforms: {
+        tDiffuse: { value: null },
+        time: { value: 0 },
+        vignetteStrength: { value: 0.45 },
+        grainStrength: { value: 0.04 },
+        chromaticStrength: { value: 0.0012 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tDiffuse;
+        uniform float time;
+        uniform float vignetteStrength;
+        uniform float grainStrength;
+        uniform float chromaticStrength;
+        varying vec2 vUv;
+
+        float rand(vec2 co) {
+          return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
+        }
+
+        void main() {
+          vec2 uv = vUv;
+
+          // Chromatic aberration (subtle color fringing at edges)
+          float dist = distance(uv, vec2(0.5));
+          float ca = chromaticStrength * dist;
+          float r = texture2D(tDiffuse, uv + vec2(ca, 0.0)).r;
+          float g = texture2D(tDiffuse, uv).g;
+          float b = texture2D(tDiffuse, uv - vec2(ca, 0.0)).b;
+          vec3 color = vec3(r, g, b);
+
+          // Vignette (dark edges)
+          float vignette = 1.0 - vignetteStrength * dist * dist * 2.0;
+          color *= vignette;
+
+          // Film grain (animated noise)
+          float grain = (rand(uv + fract(time * 0.01)) - 0.5) * grainStrength;
+          color += grain;
+
+          gl_FragColor = vec4(color, 1.0);
+        }
+      `
+    };
+    const vignettePass = new ShaderPass(vignetteShader);
+    vignettePass.renderToScreen = true;
+    composer.addPass(vignettePass);
+    // Store reference for animation update
+    window._vignettePass = vignettePass;
 
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
@@ -1939,8 +2253,20 @@ function animate() {
     return true;
   });
 
+  // Update vignette time uniform for animated film grain
+  if (window._vignettePass) {
+    window._vignettePass.uniforms.time.value = time;
+  }
+
+  // Instanced mesh pulse animation (subtle breathing for 10K neurons)
+  if (wsInstancedMesh && wsLiveMode) {
+    // Very subtle global pulse — makes the brain feel alive
+    const pulse = 1.0 + Math.sin(time * 0.8) * 0.002;
+    wsInstancedMesh.scale.setScalar(pulse);
+  }
+
   controls.update();
-  // Bloom post-processing render
+  // Bloom + cinematic post-processing render
   if (composer) {
     composer.render();
   } else {
