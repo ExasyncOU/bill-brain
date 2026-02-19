@@ -858,9 +858,9 @@ function glowAnimate(time) {
 
   colorAttr.needsUpdate = true;
 
-  // Update brain mesh material opacity based on activation
+  // Update brain mesh emissive intensity based on activation
   if (glowBrainMesh.material) {
-    glowBrainMesh.material.opacity = 0.50 + avgAct * 0.35;
+    glowBrainMesh.material.emissiveIntensity = 0.8 + avgAct * 0.6;
   }
 }
 
@@ -910,11 +910,10 @@ function idleGlowAnimate(time) {
 
   colorAttr.needsUpdate = true;
 
-  // Pulse opacity and emissive intensity
+  // Pulse emissive intensity (brain is opaque, no opacity pulse needed)
   if (glowBrainMesh.material) {
-    const breathe = Math.sin(time * 0.5) * 0.08;
-    glowBrainMesh.material.opacity = 0.60 + breathe;
-    glowBrainMesh.material.emissiveIntensity = 0.5 + breathe + Math.sin(time * 0.8) * 0.15;
+    const breathe = Math.sin(time * 0.5) * 0.15;
+    glowBrainMesh.material.emissiveIntensity = 1.0 + breathe + Math.sin(time * 0.8) * 0.2;
   }
 }
 
@@ -1005,10 +1004,12 @@ function wsToggleMode() {
 // Expose toggle for HTML button onclick
 window.wsToggleMode = wsToggleMode;
 
+const _dbgLog = [];
 function dbg(msg) {
   console.log('[Bill]', msg);
+  _dbgLog.push(msg);
   const el = document.getElementById('debug');
-  if (el) el.textContent = msg;
+  if (el) el.textContent = _dbgLog.slice(-5).join(' | ');
 }
 
 // ============================================================
@@ -1185,9 +1186,11 @@ async function init() {
     await loadData();
     dbg(`Data: ${regions.length} regions, ${neurons.length} neurons, ${synapses.length} synapses`);
 
-    dbg('Loading brain model...');
-    try { await loadBrainOBJ(); dbg('OBJ loaded'); }
-    catch (e) { dbg('OBJ failed, using procedural'); buildProceduralBrain(); }
+    dbg('Building procedural brain (immediate)...');
+    buildProceduralBrain();
+    dbg('Procedural brain ready, trying OBJ...');
+    try { await loadBrainOBJ(); dbg('OBJ loaded (replaces procedural)'); }
+    catch (e) { dbg('OBJ failed, keeping procedural brain'); }
 
     buildRegions();
     buildNeurons();
@@ -1223,7 +1226,9 @@ async function init() {
     // If server is not running, stays in Demo Mode silently
     try { wsConnect(); } catch(e) { console.log('[Bill WS] Server not available, Demo Mode'); }
 
-    dbg('Bill v5.0 - Bloom + Particle System + Live Neural Network');
+    dbg('Bill v5.2 - Opaque Brain + Bloom + SWR');
+    // Version stamp for cache-busting verification
+    console.log('%c BILL v5.2 loaded ', 'background: #0044cc; color: white; font-size: 14px;');
 
   } catch (err) {
     console.error('Init failed:', err);
@@ -1454,8 +1459,8 @@ function segmentBrainMesh(mesh) {
       colors[i * 3 + 1] = cg / totalW;
       colors[i * 3 + 2] = cb / totalW;
     } else {
-      // Default: visible cool blue for uncovered areas
-      colors[i * 3] = 0.08; colors[i * 3 + 1] = 0.18; colors[i * 3 + 2] = 0.45;
+      // Default: bright cool blue for uncovered areas
+      colors[i * 3] = 0.15; colors[i * 3 + 1] = 0.35; colors[i * 3 + 2] = 0.75;
     }
   }
 
@@ -1463,14 +1468,14 @@ function segmentBrainMesh(mesh) {
 
   mesh.material = new THREE.MeshStandardMaterial({
     vertexColors: true,
-    transparent: true,
-    opacity: 0.65,
-    roughness: 0.4,
-    metalness: 0.1,
-    emissive: new THREE.Color(0x1133aa),
-    emissiveIntensity: 0.6,
+    transparent: false,
+    opacity: 1.0,
+    roughness: 0.3,
+    metalness: 0.05,
+    emissive: new THREE.Color(0x2255cc),
+    emissiveIntensity: 1.2,
     side: THREE.DoubleSide,
-    depthWrite: false
+    depthWrite: true
   });
 
   // Store reference for glow mode
@@ -1482,7 +1487,7 @@ function segmentBrainMesh(mesh) {
 // ============================================================
 async function loadBrainOBJ() {
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => { buildProceduralBrain(); resolve(); }, 10000);
+    const timeout = setTimeout(() => { dbg('OBJ timeout, keeping procedural'); resolve(); }, 10000);
     const loader = new OBJLoader();
     loader.load('Free_Brain.obj',
       (obj) => {
@@ -1500,6 +1505,7 @@ async function loadBrainOBJ() {
               }
             }
           });
+          dbg(`OBJ: largest mesh ${largestCount} verts`);
 
           // Hide all non-brain meshes (studio watermarks)
           obj.traverse(child => {
@@ -1515,6 +1521,7 @@ async function loadBrainOBJ() {
             const center = new THREE.Vector3(); bbox.getCenter(center);
             const size = new THREE.Vector3(); bbox.getSize(size);
             const s = 6.0 / Math.max(size.x, size.y, size.z);
+            dbg(`OBJ: center=${center.x.toFixed(0)},${center.y.toFixed(0)},${center.z.toFixed(0)} scale=${s.toFixed(4)}`);
             largestMesh.geometry.translate(-center.x, -center.y, -center.z);
             largestMesh.geometry.scale(s, s, s);
             segmentBrainMesh(largestMesh);
@@ -1527,14 +1534,15 @@ async function loadBrainOBJ() {
           }));
           glow.scale.set(13, 13, 1);
           brainGroup.add(glow);
+          dbg('OBJ brain added to scene');
           resolve();
-        } catch (e) { buildProceduralBrain(); resolve(); }
+        } catch (e) { dbg('OBJ parse error: ' + e.message); resolve(); }
       },
       (xhr) => {
         if (xhr.total > 0)
           document.getElementById('loading-text').textContent = `BILL ${(xhr.loaded/xhr.total*100).toFixed(0)}%`;
       },
-      () => { clearTimeout(timeout); buildProceduralBrain(); resolve(); }
+      (err) => { clearTimeout(timeout); dbg('OBJ load failed: ' + (err?.message || 'unknown')); resolve(); }
     );
   });
 }
@@ -1557,11 +1565,11 @@ function buildProceduralBrain() {
     pos.setXYZ(i, x+n, y+n*0.5, z+n);
   }
   geo.computeVertexNormals();
-  const mat = new THREE.MeshPhysicalMaterial({
-    color: 0x2266cc, transparent: true, opacity: 0.60,
-    roughness: 0.4, metalness: 0.1,
-    emissive: new THREE.Color(0x1133aa), emissiveIntensity: 0.6,
-    side: THREE.DoubleSide, depthWrite: false
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x2266cc, transparent: false, opacity: 1.0,
+    roughness: 0.3, metalness: 0.05,
+    emissive: new THREE.Color(0x2255cc), emissiveIntensity: 1.2,
+    side: THREE.DoubleSide, depthWrite: true
   });
   const mainMesh = new THREE.Mesh(geo, mat);
   segmentBrainMesh(mainMesh);
@@ -2577,11 +2585,17 @@ function animate() {
   }
 
   controls.update();
-  // Bloom + cinematic post-processing render
-  if (composer) {
-    composer.render();
-  } else {
-    renderer.render(scene, camera);
+  // Render with safe fallback
+  try {
+    if (composer) {
+      composer.render();
+    } else {
+      renderer.render(scene, camera);
+    }
+  } catch (renderErr) {
+    // Bloom pipeline failed — fall back to direct render
+    console.warn('Composer render failed, direct render:', renderErr);
+    try { renderer.render(scene, camera); } catch(e2) { /* fatal */ }
   }
 }
 
@@ -2748,7 +2762,17 @@ function updateLiveIndicator() {
 // ============================================================
 // START
 // ============================================================
+// Failsafe: always hide loading screen after 15 seconds
+setTimeout(() => {
+  const ld = document.getElementById('loading');
+  if (ld && !ld.classList.contains('hidden')) {
+    ld.classList.add('hidden');
+    dbg('FAILSAFE: loading screen force-hidden');
+  }
+}, 15000);
+
 init().catch(err => {
   console.error('Fatal:', err);
+  dbg('FATAL: ' + err.message);
   document.getElementById('loading')?.classList.add('hidden');
 });
