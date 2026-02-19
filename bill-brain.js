@@ -867,6 +867,7 @@ function glowAnimate(time) {
 /**
  * Idle glow animation: gentle pulsing when no live data is streaming.
  * Makes the brain visible and alive even without WebSocket / training.
+ * Simulates slow sharp-wave-ripple-like traveling waves across the cortex.
  */
 function idleGlowAnimate(time) {
   if (!glowBrainMesh) return;
@@ -875,39 +876,45 @@ function idleGlowAnimate(time) {
   if (!colorAttr) return;
 
   const nVerts = colorAttr.count;
+  const posAttr = geo.attributes.position;
 
-  // Gentle traveling wave across the brain surface
+  // Traveling wave: simulates sharp-wave-ripple propagation across cortex
+  // Multiple waves with different speeds/directions for organic complexity
   for (let vi = 0; vi < nVerts; vi++) {
-    const x = geo.attributes.position.getX(vi);
-    const y = geo.attributes.position.getY(vi);
-    const z = geo.attributes.position.getZ(vi);
+    const x = posAttr.getX(vi);
+    const y = posAttr.getY(vi);
+    const z = posAttr.getZ(vi);
 
-    // Traveling wave: direction changes slowly for organic feel
-    const wave1 = Math.sin(x * 0.8 + time * 0.4) * 0.5 + 0.5;
-    const wave2 = Math.sin(y * 0.6 - time * 0.3 + 1.5) * 0.5 + 0.5;
-    const wave3 = Math.sin(z * 0.7 + time * 0.25 + 3.0) * 0.5 + 0.5;
-    const combined = (wave1 * 0.4 + wave2 * 0.35 + wave3 * 0.25);
+    // Primary wave: slow sweep from hippocampus outward
+    const wave1 = Math.sin(x * 0.6 + y * 0.3 + time * 0.35) * 0.5 + 0.5;
+    // Secondary wave: perpendicular direction
+    const wave2 = Math.sin(z * 0.5 - y * 0.4 + time * 0.25 + 2.0) * 0.5 + 0.5;
+    // Tertiary: subtle high-frequency ripple (sharp wave ripple ~150Hz feel)
+    const ripple = Math.sin((x + z) * 2.5 + time * 1.8) * 0.15 + 0.85;
+    const combined = (wave1 * 0.45 + wave2 * 0.35 + 0.2) * ripple;
 
-    // Brightness: 0.20 base → 0.55 peak (visible but not blinding)
-    const brightness = 0.20 + combined * 0.35;
+    // Brightness: 0.4 base → 1.0 peak (clearly visible!)
+    const brightness = 0.4 + combined * 0.6;
 
-    // Use the existing base colors if available, else deep blue
+    // Use the existing base colors if available, else region-blended blue
     if (glowBaseColors) {
       const br = glowBaseColors[vi * 3];
       const bg = glowBaseColors[vi * 3 + 1];
       const bb = glowBaseColors[vi * 3 + 2];
       colorAttr.setXYZ(vi, br * brightness, bg * brightness, bb * brightness);
     } else {
-      // Fallback: cool blue tones
-      colorAttr.setXYZ(vi, 0.05 * brightness, 0.15 * brightness, 0.45 * brightness);
+      // Fallback: bright cool blue-purple tones
+      colorAttr.setXYZ(vi, 0.15 * brightness, 0.25 * brightness, 0.7 * brightness);
     }
   }
 
   colorAttr.needsUpdate = true;
 
-  // Pulse opacity gently
+  // Pulse opacity and emissive intensity
   if (glowBrainMesh.material) {
-    glowBrainMesh.material.opacity = 0.50 + Math.sin(time * 0.6) * 0.08;
+    const breathe = Math.sin(time * 0.5) * 0.08;
+    glowBrainMesh.material.opacity = 0.60 + breathe;
+    glowBrainMesh.material.emissiveIntensity = 0.5 + breathe + Math.sin(time * 0.8) * 0.15;
   }
 }
 
@@ -1093,9 +1100,9 @@ async function init() {
     composer.addPass(new RenderPass(scene, camera));
     const bloomPass = new UnrealBloomPass(
       new THREE.Vector2(window.innerWidth, window.innerHeight),
-      0.7,   // strength - slightly stronger for 10K neuron density
-      0.6,   // radius - wider soft spread for organic neural glow
-      0.65   // threshold - catch more subtle glows from sparse neurons
+      1.0,   // strength - strong bloom for visible brain glow
+      0.8,   // radius - wide soft spread for organic neural glow
+      0.35   // threshold - low threshold to catch brain mesh emissive glow
     );
     composer.addPass(bloomPass);
 
@@ -1454,15 +1461,15 @@ function segmentBrainMesh(mesh) {
 
   geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
-  mesh.material = new THREE.MeshPhysicalMaterial({
+  mesh.material = new THREE.MeshStandardMaterial({
     vertexColors: true,
     transparent: true,
-    opacity: 0.55,
-    roughness: 0.15,
-    metalness: 0.0,
-    clearcoat: 0.4,
-    clearcoatRoughness: 0.1,
-    side: THREE.FrontSide,
+    opacity: 0.65,
+    roughness: 0.4,
+    metalness: 0.1,
+    emissive: new THREE.Color(0x1133aa),
+    emissiveIntensity: 0.6,
+    side: THREE.DoubleSide,
     depthWrite: false
   });
 
@@ -1516,7 +1523,7 @@ async function loadBrainOBJ() {
           brainGroup.add(obj);
           const glow = new THREE.Sprite(new THREE.SpriteMaterial({
             map: glowTexture, color: 0x0066ff, transparent: true,
-            opacity: 0.18, blending: THREE.AdditiveBlending, depthWrite: false
+            opacity: 0.35, blending: THREE.AdditiveBlending, depthWrite: false
           }));
           glow.scale.set(13, 13, 1);
           brainGroup.add(glow);
@@ -1551,8 +1558,10 @@ function buildProceduralBrain() {
   }
   geo.computeVertexNormals();
   const mat = new THREE.MeshPhysicalMaterial({
-    color: 0x0066cc, transparent: true, opacity: 0.45,
-    roughness: 0.3, metalness: 0.1, side: THREE.DoubleSide, depthWrite: false
+    color: 0x2266cc, transparent: true, opacity: 0.60,
+    roughness: 0.4, metalness: 0.1,
+    emissive: new THREE.Color(0x1133aa), emissiveIntensity: 0.6,
+    side: THREE.DoubleSide, depthWrite: false
   });
   const mainMesh = new THREE.Mesh(geo, mat);
   segmentBrainMesh(mainMesh);
