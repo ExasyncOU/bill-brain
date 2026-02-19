@@ -122,6 +122,21 @@ const _tmpColor = new THREE.Color();
 const _tmpVec = new THREE.Vector3();
 
 // ============================================================
+// AREA-GLOW MODE (fMRI-style visualization)
+// ============================================================
+let glowMode = false;                // true = area glow, false = individual neurons
+let glowBrainMesh = null;            // Reference to the brain mesh for glow updates
+let glowVertexWeights = null;        // Float32Array[nVertices * nAreas] — precomputed
+let glowBaseColors = null;           // Float32Array[nVertices * 3] — base HSL colors
+let glowVertexCount = 0;             // Number of vertices in brain mesh
+let glowAreaCount = 0;               // Number of areas from server
+let glowAreaCenters = null;          // [[x,y,z], ...] from server
+let glowInitialized = false;         // Whether vertex-area mapping is computed
+let glowLastActivations = null;      // Last area_activations from server
+let glowTargetActivations = null;    // Interpolation target for smooth transitions
+let glowCurrentActivations = null;   // Current interpolated activations
+
+// ============================================================
 // WEBSOCKET CLIENT
 // ============================================================
 
@@ -146,7 +161,13 @@ function wsConnect() {
     wsConnection.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'state') {
+        if (data.type === 'glow') {
+          // Compact area-glow update (~500 bytes instead of 768KB)
+          wsLastState = data;
+          if (wsLiveMode) {
+            wsApplyGlow(data);
+          }
+        } else if (data.type === 'state') {
           wsLastState = data;
           if (wsLiveMode) {
             wsApplyState(data);
@@ -629,6 +650,220 @@ function wsUpdateLiveSynapses(state) {
   });
 }
 
+// ============================================================
+// AREA-GLOW FUNCTIONS
+// ============================================================
+
+/**
+ * Initialize the vertex-to-area weight mapping for glow visualization.
+ * Called once when the first glow message arrives with area_centers.
+ * Precomputes a Gaussian weight for each (vertex, area) pair.
+ */
+function glowInitMapping(areaCenters) {
+  if (!glowBrainMesh || !glowBrainMesh.geometry) return;
+
+  const geo = glowBrainMesh.geometry;
+  const positions = geo.attributes.position;
+  const nVerts = positions.count;
+  const nAreas = areaCenters.length;
+
+  glowVertexCount = nVerts;
+  glowAreaCount = nAreas;
+  glowAreaCenters = areaCenters;
+
+  // Precompute vertex-area Gaussian weights
+  glowVertexWeights = new Float32Array(nVerts * nAreas);
+
+  // Store base colors from current vertex colors
+  const colorAttr = geo.attributes.color;
+  if (colorAttr) {
+    glowBaseColors = new Float32Array(nVerts * 3);
+    for (let i = 0; i < nVerts; i++) {
+      glowBaseColors[i * 3] = colorAttr.getX(i);
+      glowBaseColors[i * 3 + 1] = colorAttr.getY(i);
+      glowBaseColors[i * 3 + 2] = colorAttr.getZ(i);
+    }
+  }
+
+  // Map backend area centers to brain mesh coordinate space
+  // Backend uses positions in [-5, 5], brain mesh is scaled to fit ~6 units
+  // The area_centers from the server are in the neural network space
+  // We need to find the best spatial mapping to mesh vertices
+
+  // Compute brain mesh bounding box for normalization
+  geo.computeBoundingBox();
+  const bbox = geo.boundingBox;
+  const meshCenter = new THREE.Vector3();
+  bbox.getCenter(meshCenter);
+  const meshSize = new THREE.Vector3();
+  bbox.getSize(meshSize);
+  const meshScale = Math.max(meshSize.x, meshSize.y, meshSize.z);
+
+  // Normalize area centers to mesh scale
+  // Find area center bounds
+  let acMinX = Infinity, acMaxX = -Infinity;
+  let acMinY = Infinity, acMaxY = -Infinity;
+  let acMinZ = Infinity, acMaxZ = -Infinity;
+  for (const ac of areaCenters) {
+    acMinX = Math.min(acMinX, ac[0]); acMaxX = Math.max(acMaxX, ac[0]);
+    acMinY = Math.min(acMinY, ac[1]); acMaxY = Math.max(acMaxY, ac[1]);
+    acMinZ = Math.min(acMinZ, ac[2]); acMaxZ = Math.max(acMaxZ, ac[2]);
+  }
+  const acRange = Math.max(acMaxX - acMinX, acMaxY - acMinY, acMaxZ - acMinZ, 0.01);
+  const acCenter = [(acMinX + acMaxX) / 2, (acMinY + acMaxY) / 2, (acMinZ + acMaxZ) / 2];
+
+  // Map area centers to mesh coordinate space
+  const mappedCenters = areaCenters.map(ac => new THREE.Vector3(
+    meshCenter.x + (ac[0] - acCenter[0]) / acRange * meshScale * 0.8,
+    meshCenter.y + (ac[1] - acCenter[1]) / acRange * meshScale * 0.8,
+    meshCenter.z + (ac[2] - acCenter[2]) / acRange * meshScale * 0.8,
+  ));
+
+  // Compute sigma: use average distance between area centers
+  let totalDist = 0, distCount = 0;
+  for (let i = 0; i < nAreas; i++) {
+    for (let j = i + 1; j < nAreas; j++) {
+      totalDist += mappedCenters[i].distanceTo(mappedCenters[j]);
+      distCount++;
+    }
+  }
+  const sigma = (totalDist / Math.max(distCount, 1)) * 0.6;
+  const sigma2inv = 1.0 / (2.0 * sigma * sigma);
+
+  // Compute weights: Gaussian(dist(vertex, areaCenter))
+  const vertPos = new THREE.Vector3();
+  for (let vi = 0; vi < nVerts; vi++) {
+    vertPos.set(positions.getX(vi), positions.getY(vi), positions.getZ(vi));
+    let totalW = 0;
+    for (let ai = 0; ai < nAreas; ai++) {
+      const d = vertPos.distanceTo(mappedCenters[ai]);
+      const w = Math.exp(-d * d * sigma2inv);
+      glowVertexWeights[vi * nAreas + ai] = w;
+      totalW += w;
+    }
+    // Normalize weights per vertex (sum to 1)
+    if (totalW > 0.001) {
+      for (let ai = 0; ai < nAreas; ai++) {
+        glowVertexWeights[vi * nAreas + ai] /= totalW;
+      }
+    }
+  }
+
+  // Initialize interpolation arrays
+  glowCurrentActivations = new Float32Array(nAreas);
+  glowTargetActivations = new Float32Array(nAreas);
+
+  glowInitialized = true;
+  console.log(`[Bill Glow] Initialized: ${nVerts} vertices × ${nAreas} areas, sigma=${sigma.toFixed(2)}`);
+}
+
+/**
+ * Apply area-glow visualization from compact glow message.
+ * Updates brain mesh vertex colors based on area activations.
+ * ~500 bytes per frame instead of 768KB.
+ */
+function wsApplyGlow(data) {
+  if (!data.area_activations) return;
+
+  // Initialize glow mapping on first message
+  if (!glowInitialized && data.area_centers && glowBrainMesh) {
+    glowInitMapping(data.area_centers);
+    // Enable glow mode: hide individual neurons
+    glowMode = true;
+    wsHideDemoObjects();
+    // Hide instanced neurons if visible
+    if (wsInstancedMesh) { wsInstancedMesh.visible = false; }
+    if (wsSynapseLineSegments) { wsSynapseLineSegments.visible = false; }
+    dbg(`GLOW MODE: ${data.n_areas} areas, ${data.n_active}/${data.n_neurons} alive`);
+  }
+
+  if (!glowInitialized || !glowBrainMesh) return;
+
+  // Set target activations for smooth interpolation
+  for (let i = 0; i < data.area_activations.length && i < glowAreaCount; i++) {
+    glowTargetActivations[i] = data.area_activations[i];
+  }
+
+  // Update metrics HUD
+  if (data.metrics) {
+    wsUpdateMetricsHUD(data.metrics);
+  }
+
+  // Update HUD with neurogenesis info
+  const setEl = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+  if (data.n_active !== undefined) {
+    setEl('stat-neurons', `${data.n_active.toLocaleString()} alive`);
+  }
+  if (data.neurogenesis) {
+    const ng = data.neurogenesis;
+    setEl('stat-synapses', `+${ng.total_born} -${ng.total_pruned}`);
+    setEl('stat-regions', `Cycle ${ng.cycle}`);
+  }
+}
+
+/**
+ * Animate glow: interpolate activations and update vertex colors.
+ * Called every frame from animate() for smooth transitions.
+ */
+function glowAnimate(time) {
+  if (!glowMode || !glowInitialized || !glowBrainMesh) return;
+
+  const geo = glowBrainMesh.geometry;
+  const colorAttr = geo.attributes.color;
+  if (!colorAttr || !glowBaseColors) return;
+
+  // Smooth interpolation toward target activations
+  const lerpRate = 0.08; // Smooth transition speed
+  for (let ai = 0; ai < glowAreaCount; ai++) {
+    glowCurrentActivations[ai] += (glowTargetActivations[ai] - glowCurrentActivations[ai]) * lerpRate;
+  }
+
+  // Compute per-vertex activation and update colors
+  const nVerts = glowVertexCount;
+  const nAreas = glowAreaCount;
+
+  // Pulse effect: subtle breathing based on overall activation
+  let totalAct = 0;
+  for (let ai = 0; ai < nAreas; ai++) totalAct += glowCurrentActivations[ai];
+  const avgAct = totalAct / nAreas;
+  const pulse = 1.0 + Math.sin(time * 1.2) * 0.05 * avgAct;
+
+  for (let vi = 0; vi < nVerts; vi++) {
+    // Weighted sum of area activations for this vertex
+    let vertAct = 0;
+    const offset = vi * nAreas;
+    for (let ai = 0; ai < nAreas; ai++) {
+      vertAct += glowVertexWeights[offset + ai] * glowCurrentActivations[ai];
+    }
+
+    // Get base color
+    const br = glowBaseColors[vi * 3];
+    const bg = glowBaseColors[vi * 3 + 1];
+    const bb = glowBaseColors[vi * 3 + 2];
+
+    // Glow effect: modulate luminance and saturation
+    // Low activation: very dim, deep blue/dark (0.05 brightness)
+    // High activation: full bright glow (1.0 brightness)
+    const glow = 0.05 + vertAct * 0.95 * pulse;
+
+    // Also shift toward brighter blue/white at high activation
+    const whiteMix = vertAct * 0.3; // 30% white blend at full activation
+
+    const r = (br * (1 - whiteMix) + whiteMix) * glow;
+    const g = (bg * (1 - whiteMix) + whiteMix) * glow;
+    const b = (bb * (1 - whiteMix) + whiteMix * 0.95) * glow;
+
+    colorAttr.setXYZ(vi, r, g, b);
+  }
+
+  colorAttr.needsUpdate = true;
+
+  // Update brain mesh material opacity based on activation
+  if (glowBrainMesh.material) {
+    glowBrainMesh.material.opacity = 0.25 + avgAct * 0.45;
+  }
+}
+
 /**
  * Update the metrics HUD with live training data.
  */
@@ -694,6 +929,15 @@ function wsToggleMode() {
     wsLiveBuilt = false;
     wsInstancedCount = 0;
     wsInstancedNeuronData = [];
+    // Reset glow mode
+    glowMode = false;
+    glowInitialized = false;
+    glowVertexWeights = null;
+    glowBaseColors = null;
+    // Restore brain mesh base colors
+    if (glowBrainMesh && glowBrainMesh.geometry.attributes.color) {
+      // Will be re-colored on next segmentBrainMesh call
+    }
     // Show demo objects again
     wsShowDemoObjects();
     dbg('DEMO MODE: Simulation active');
@@ -1174,6 +1418,9 @@ function segmentBrainMesh(mesh) {
     side: THREE.FrontSide,
     depthWrite: false
   });
+
+  // Store reference for glow mode
+  glowBrainMesh = mesh;
 }
 
 // ============================================================
@@ -2253,13 +2500,16 @@ function animate() {
     return true;
   });
 
+  // Area-glow: smooth fMRI-style activation visualization
+  glowAnimate(time);
+
   // Update vignette time uniform for animated film grain
   if (window._vignettePass) {
     window._vignettePass.uniforms.time.value = time;
   }
 
   // Instanced mesh pulse animation (subtle breathing for 10K neurons)
-  if (wsInstancedMesh && wsLiveMode) {
+  if (wsInstancedMesh && wsLiveMode && !glowMode) {
     // Very subtle global pulse — makes the brain feel alive
     const pulse = 1.0 + Math.sin(time * 0.8) * 0.002;
     wsInstancedMesh.scale.setScalar(pulse);
