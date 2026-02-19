@@ -842,9 +842,9 @@ function glowAnimate(time) {
     const bb = glowBaseColors[vi * 3 + 2];
 
     // Glow effect: modulate luminance and saturation
-    // Low activation: very dim, deep blue/dark (0.05 brightness)
+    // Low activation: visible base glow (0.25 brightness)
     // High activation: full bright glow (1.0 brightness)
-    const glow = 0.05 + vertAct * 0.95 * pulse;
+    const glow = 0.25 + vertAct * 0.75 * pulse;
 
     // Also shift toward brighter blue/white at high activation
     const whiteMix = vertAct * 0.3; // 30% white blend at full activation
@@ -860,7 +860,54 @@ function glowAnimate(time) {
 
   // Update brain mesh material opacity based on activation
   if (glowBrainMesh.material) {
-    glowBrainMesh.material.opacity = 0.25 + avgAct * 0.45;
+    glowBrainMesh.material.opacity = 0.50 + avgAct * 0.35;
+  }
+}
+
+/**
+ * Idle glow animation: gentle pulsing when no live data is streaming.
+ * Makes the brain visible and alive even without WebSocket / training.
+ */
+function idleGlowAnimate(time) {
+  if (!glowBrainMesh) return;
+  const geo = glowBrainMesh.geometry;
+  const colorAttr = geo.attributes.color;
+  if (!colorAttr) return;
+
+  const nVerts = colorAttr.count;
+
+  // Gentle traveling wave across the brain surface
+  for (let vi = 0; vi < nVerts; vi++) {
+    const x = geo.attributes.position.getX(vi);
+    const y = geo.attributes.position.getY(vi);
+    const z = geo.attributes.position.getZ(vi);
+
+    // Traveling wave: direction changes slowly for organic feel
+    const wave1 = Math.sin(x * 0.8 + time * 0.4) * 0.5 + 0.5;
+    const wave2 = Math.sin(y * 0.6 - time * 0.3 + 1.5) * 0.5 + 0.5;
+    const wave3 = Math.sin(z * 0.7 + time * 0.25 + 3.0) * 0.5 + 0.5;
+    const combined = (wave1 * 0.4 + wave2 * 0.35 + wave3 * 0.25);
+
+    // Brightness: 0.20 base → 0.55 peak (visible but not blinding)
+    const brightness = 0.20 + combined * 0.35;
+
+    // Use the existing base colors if available, else deep blue
+    if (glowBaseColors) {
+      const br = glowBaseColors[vi * 3];
+      const bg = glowBaseColors[vi * 3 + 1];
+      const bb = glowBaseColors[vi * 3 + 2];
+      colorAttr.setXYZ(vi, br * brightness, bg * brightness, bb * brightness);
+    } else {
+      // Fallback: cool blue tones
+      colorAttr.setXYZ(vi, 0.05 * brightness, 0.15 * brightness, 0.45 * brightness);
+    }
+  }
+
+  colorAttr.needsUpdate = true;
+
+  // Pulse opacity gently
+  if (glowBrainMesh.material) {
+    glowBrainMesh.material.opacity = 0.50 + Math.sin(time * 0.6) * 0.08;
   }
 }
 
@@ -1028,7 +1075,7 @@ async function init() {
     glowTexture = createGlowTexture();
 
     scene = new THREE.Scene();
-    scene.fog = new THREE.FogExp2(0x000510, 0.04);
+    scene.fog = new THREE.FogExp2(0x000510, 0.018);
 
     camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 200);
     camera.position.set(5, 4, 6);
@@ -1037,7 +1084,7 @@ async function init() {
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.5;
+    renderer.toneMappingExposure = 2.0;
     renderer.localClippingEnabled = true;
     document.getElementById('canvas-container').appendChild(renderer.domElement);
 
@@ -1057,7 +1104,7 @@ async function init() {
       uniforms: {
         tDiffuse: { value: null },
         time: { value: 0 },
-        vignetteStrength: { value: 0.45 },
+        vignetteStrength: { value: 0.25 },
         grainStrength: { value: 0.04 },
         chromaticStrength: { value: 0.0012 },
       },
@@ -1257,15 +1304,15 @@ function buildStarfield() {
 // LIGHTING
 // ============================================================
 function setupLighting() {
-  scene.add(new THREE.AmbientLight(0x0a1530, 0.6));
-  const main = new THREE.DirectionalLight(0x4488ff, 0.8);
+  scene.add(new THREE.AmbientLight(0x1a2540, 1.2));
+  const main = new THREE.DirectionalLight(0x4488ff, 1.2);
   main.position.set(5, 8, 5); scene.add(main);
-  const fill = new THREE.DirectionalLight(0x2244aa, 0.3);
+  const fill = new THREE.DirectionalLight(0x3355bb, 0.6);
   fill.position.set(-5, -3, -5); scene.add(fill);
-  const point = new THREE.PointLight(0x0066ff, 2.5, 25);
+  const point = new THREE.PointLight(0x2266ff, 3.5, 30);
   point.position.set(0, 0, 0); scene.add(point);
-  scene.add(new THREE.HemisphereLight(0x2244aa, 0x001122, 0.5));
-  const rim = new THREE.DirectionalLight(0x0088ff, 0.5);
+  scene.add(new THREE.HemisphereLight(0x3355bb, 0x001133, 0.8));
+  const rim = new THREE.DirectionalLight(0x0088ff, 0.7);
   rim.position.set(-3, 2, -5); scene.add(rim);
 }
 
@@ -1400,8 +1447,8 @@ function segmentBrainMesh(mesh) {
       colors[i * 3 + 1] = cg / totalW;
       colors[i * 3 + 2] = cb / totalW;
     } else {
-      // Default: deep blue for uncovered areas
-      colors[i * 3] = 0.05; colors[i * 3 + 1] = 0.1; colors[i * 3 + 2] = 0.3;
+      // Default: visible cool blue for uncovered areas
+      colors[i * 3] = 0.08; colors[i * 3 + 1] = 0.18; colors[i * 3 + 2] = 0.45;
     }
   }
 
@@ -1410,7 +1457,7 @@ function segmentBrainMesh(mesh) {
   mesh.material = new THREE.MeshPhysicalMaterial({
     vertexColors: true,
     transparent: true,
-    opacity: 0.30,
+    opacity: 0.55,
     roughness: 0.15,
     metalness: 0.0,
     clearcoat: 0.4,
@@ -1504,7 +1551,7 @@ function buildProceduralBrain() {
   }
   geo.computeVertexNormals();
   const mat = new THREE.MeshPhysicalMaterial({
-    color: 0x0066cc, transparent: true, opacity: 0.12,
+    color: 0x0066cc, transparent: true, opacity: 0.45,
     roughness: 0.3, metalness: 0.1, side: THREE.DoubleSide, depthWrite: false
   });
   const mainMesh = new THREE.Mesh(geo, mat);
@@ -2502,6 +2549,11 @@ function animate() {
 
   // Area-glow: smooth fMRI-style activation visualization
   glowAnimate(time);
+
+  // Idle brain glow: when NOT in glow mode, show gentle ambient pulsing
+  if (!glowMode && glowBrainMesh && glowBrainMesh.geometry.attributes.color) {
+    idleGlowAnimate(time);
+  }
 
   // Update vignette time uniform for animated film grain
   if (window._vignettePass) {
