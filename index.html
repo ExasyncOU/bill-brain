@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bill - B-Intelligent | Real Neural Network</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000510;
+      color: #c0d8ff;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      overflow: hidden;
+    }
+    #canvas-container { width: 100vw; height: 100vh; position: fixed; top: 0; left: 0; }
+
+    /* HUD */
+    #hud { position: fixed; top: 0; left: 0; width: 100%; pointer-events: none; z-index: 10; }
+    #hud-top { display: flex; justify-content: space-between; align-items: flex-start; padding: 20px 30px; }
+    #logo { font-size: 28px; font-weight: 700; letter-spacing: 4px; color: #4d9fff; text-shadow: 0 0 20px rgba(77,159,255,0.5); }
+    #logo span { color: #80b8ff; font-weight: 300; font-size: 14px; letter-spacing: 2px; display: block; }
+    #stats { text-align: right; font-size: 12px; opacity: 0.7; line-height: 1.8; }
+    #stats .value { color: #4d9fff; font-weight: 600; }
+
+    /* Region/Neuron Panel */
+    #region-panel {
+      position: fixed; right: 30px; top: 50%; transform: translateY(-50%);
+      width: 300px; max-height: 70vh; overflow-y: auto;
+      background: rgba(0,8,25,0.9); border: 1px solid rgba(77,159,255,0.2);
+      border-radius: 12px; padding: 20px; backdrop-filter: blur(10px);
+      z-index: 10; display: none;
+    }
+    #region-panel.visible { display: block; }
+    #region-panel h3 { color: #4d9fff; font-size: 16px; margin-bottom: 4px; }
+    #region-panel .subtitle { color: #6090c0; font-size: 11px; margin-bottom: 12px; }
+    .stat-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(77,159,255,0.1); font-size: 13px; }
+    .stat-label { color: #6090c0; }
+    .stat-value { color: #80b8ff; font-weight: 600; }
+    #rp-neuron-list { margin-top: 10px; max-height: 200px; overflow-y: auto; }
+    .neuron-list-item {
+      padding: 4px 8px; margin: 2px 0; font-size: 12px; cursor: pointer;
+      border-radius: 4px; transition: background 0.2s; color: #80b8ff;
+    }
+    .neuron-list-item:hover { background: rgba(77,159,255,0.15); }
+
+    /* New Neuron Panel */
+    #new-neuron-panel {
+      position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+      width: 340px; background: rgba(0,8,25,0.95); border: 1px solid rgba(77,159,255,0.3);
+      border-radius: 12px; padding: 24px; backdrop-filter: blur(15px);
+      z-index: 20; display: none;
+    }
+    #new-neuron-panel.visible { display: block; }
+    #new-neuron-panel h3 { color: #4d9fff; margin-bottom: 16px; font-size: 16px; }
+    #new-neuron-panel label { display: block; color: #6090c0; font-size: 11px; margin: 10px 0 4px; text-transform: uppercase; letter-spacing: 1px; }
+    #new-neuron-panel input, #new-neuron-panel select, #new-neuron-panel textarea {
+      width: 100%; padding: 8px 10px; background: rgba(0,20,60,0.6);
+      border: 1px solid rgba(77,159,255,0.2); border-radius: 6px;
+      color: #c0d8ff; font-size: 13px; font-family: inherit;
+    }
+    #new-neuron-panel textarea { height: 60px; resize: vertical; }
+    #new-neuron-panel input:focus, #new-neuron-panel select:focus, #new-neuron-panel textarea:focus {
+      outline: none; border-color: rgba(77,159,255,0.5);
+    }
+    .nn-buttons { display: flex; gap: 10px; margin-top: 16px; }
+    .nn-buttons .btn { flex: 1; text-align: center; }
+
+    /* Legend */
+    #legend { position: fixed; left: 30px; bottom: 30px; z-index: 10; font-size: 11px; pointer-events: auto; }
+    .legend-item { display: flex; align-items: center; gap: 8px; padding: 3px 0; cursor: pointer; opacity: 0.6; transition: opacity 0.3s; }
+    .legend-item:hover, .legend-item.active { opacity: 1; }
+    .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+    /* Bottom bar */
+    #bottom-bar { position: fixed; bottom: 30px; right: 30px; display: flex; gap: 10px; z-index: 10; }
+    .btn {
+      background: rgba(0,30,80,0.6); border: 1px solid rgba(77,159,255,0.3);
+      color: #80b8ff; padding: 8px 14px; border-radius: 8px; font-size: 12px;
+      cursor: pointer; pointer-events: auto; transition: all 0.3s;
+    }
+    .btn:hover { background: rgba(0,50,120,0.8); border-color: rgba(77,159,255,0.6); box-shadow: 0 0 15px rgba(77,159,255,0.2); }
+    .btn.active { background: rgba(0,80,200,0.4); border-color: #4d9fff; }
+    .btn.primary { background: rgba(0,80,200,0.5); border-color: #4d9fff; }
+
+    /* Loading */
+    #loading {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: #000510; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; z-index: 100; transition: opacity 0.8s;
+    }
+    #loading.hidden { opacity: 0; pointer-events: none; }
+    #loading-text { color: #4d9fff; font-size: 18px; letter-spacing: 6px; margin-top: 20px; }
+    .pulse-ring { width: 60px; height: 60px; border: 2px solid rgba(77,159,255,0.3); border-radius: 50%; animation: pulse 1.5s ease-out infinite; }
+    @keyframes pulse { 0% { transform: scale(0.5); opacity: 1; } 100% { transform: scale(2); opacity: 0; } }
+
+    /* Debug */
+    #debug { position: fixed; bottom: 70px; right: 30px; font-size: 10px; color: #335; z-index: 10; max-width: 300px; text-align: right; }
+
+    /* LIVE indicator */
+    #live-indicator {
+      position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+      display: none; align-items: center; gap: 8px;
+      background: rgba(0,8,25,0.8); border: 1px solid rgba(0,255,100,0.3);
+      border-radius: 20px; padding: 6px 16px; z-index: 10;
+      font-size: 11px; letter-spacing: 2px; color: #00ff64;
+    }
+    #live-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #00ff64; box-shadow: 0 0 8px #00ff64;
+      animation: livePulse 1.5s ease-in-out infinite;
+    }
+    @keyframes livePulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+    /* Cross-section controls */
+    #crosssection-controls {
+      position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+      display: none; align-items: center; gap: 12px;
+      background: rgba(0,8,25,0.9); border: 1px solid rgba(77,159,255,0.2);
+      border-radius: 10px; padding: 12px 20px; backdrop-filter: blur(10px);
+      z-index: 10; pointer-events: auto;
+    }
+    #crosssection-controls.visible { display: flex; }
+    #crosssection-controls input[type="range"] {
+      -webkit-appearance: none; width: 280px; height: 4px; border-radius: 2px;
+      background: rgba(77,159,255,0.2); outline: none;
+    }
+    #crosssection-controls input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+      background: #4d9fff; cursor: pointer; box-shadow: 0 0 8px rgba(77,159,255,0.5);
+    }
+    #clip-label { color: #6090c0; font-size: 12px; min-width: 100px; }
+    .axis-btns { display: flex; gap: 4px; }
+    .axis-btns .btn { padding: 4px 10px; font-size: 11px; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(77,159,255,0.3); border-radius: 2px; }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <div class="pulse-ring"></div>
+    <div id="loading-text">BILL</div>
+  </div>
+
+  <div id="canvas-container"></div>
+
+  <div id="live-indicator">
+    <div id="live-dot"></div>
+    LIVE - AGENT ACTIVITY
+  </div>
+
+  <div id="hud">
+    <div id="hud-top">
+      <div id="logo">
+        BILL
+        <span>B-INTELLIGENT NEURAL SYSTEM v5.0</span>
+      </div>
+      <div id="stats">
+        NEURONEN: <span class="value" id="stat-neurons">0</span><br>
+        SYNAPSEN: <span class="value" id="stat-synapses">0</span><br>
+        REGIONEN: <span class="value" id="stat-regions">0</span><br>
+        KONNEKTIVITAET: <span class="value" id="stat-connectivity">0%</span><br>
+        FEUERRATE: <span class="value" id="stat-firerate">0</span>/s
+      </div>
+    </div>
+  </div>
+
+  <div id="region-panel">
+    <h3 id="rp-name">-</h3>
+    <div class="subtitle" id="rp-desc">-</div>
+    <div class="stat-row"><span class="stat-label">Typ</span><span class="stat-value" id="rp-neurons">-</span></div>
+    <div class="stat-row"><span class="stat-label">Verbindungen</span><span class="stat-value" id="rp-synapses">-</span></div>
+    <div class="stat-row"><span class="stat-label">Erfolgsrate</span><span class="stat-value" id="rp-success">-</span></div>
+    <div class="stat-row"><span class="stat-label">Erstellt von</span><span class="stat-value" id="rp-model">-</span></div>
+    <div class="stat-row"><span class="stat-label">Status</span><span class="stat-value" id="rp-status">-</span></div>
+    <div id="rp-neuron-list"></div>
+  </div>
+
+  <div id="new-neuron-panel">
+    <h3>Neues Neuron erstellen</h3>
+    <label>Label (Wissen)</label>
+    <input type="text" id="nn-label" placeholder="z.B. Kundenanalyse-Muster">
+    <label>Region</label>
+    <select id="nn-region"></select>
+    <label>Typ</label>
+    <select id="nn-type">
+      <option value="concept">Konzept</option>
+      <option value="skill">Faehigkeit</option>
+      <option value="pattern">Muster</option>
+      <option value="memory">Erinnerung</option>
+      <option value="decision">Entscheidung</option>
+      <option value="strategy">Strategie</option>
+    </select>
+    <label>Beschreibung</label>
+    <textarea id="nn-desc" placeholder="Was repraesentiert dieses Neuron?"></textarea>
+    <div class="nn-buttons">
+      <button class="btn" onclick="closeNewNeuronPanel()">Abbrechen</button>
+      <button class="btn primary" onclick="createNeuronFromUI()">Erstellen</button>
+    </div>
+  </div>
+
+  <div id="legend"></div>
+
+  <div id="crosssection-controls">
+    <span id="clip-label">Schnittebene</span>
+    <input type="range" id="clip-slider" min="-40" max="40" step="1" value="40" oninput="updateClipPosition(this.value/10)">
+    <div class="axis-btns">
+      <button class="btn active" id="ax-z" onclick="setClipAxis('z')">Axial</button>
+      <button class="btn" id="ax-x" onclick="setClipAxis('x')">Sagittal</button>
+      <button class="btn" id="ax-y" onclick="setClipAxis('y')">Koronal</button>
+    </div>
+  </div>
+
+  <div id="bottom-bar">
+    <button class="btn primary" onclick="openNewNeuronPanel()">+ Neuron</button>
+    <button class="btn" id="btn-fire" onclick="simulateFiring()">Signal-Kaskade</button>
+    <button class="btn active" id="btn-rotate" onclick="toggleAutoRotate()">Auto-Rotate</button>
+    <button class="btn active" id="btn-labels" onclick="toggleLabels()">Labels</button>
+    <button class="btn" id="btn-cross" onclick="toggleCrossSection()">Querschnitt</button>
+    <button class="btn" id="btn-hemi" onclick="splitHemispheres()">Hemisph&auml;ren</button>
+    <button class="btn" id="ws-toggle-btn" onclick="wsToggleMode()" style="background:rgba(255,100,0,0.3);border-color:#f60;">DEMO</button>
+  </div>
+
+  <div id="debug"></div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="bill-brain.js"></script>
+</body>
+</html>

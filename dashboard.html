@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bill - B-Intelligent | Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000510;
+      color: #c0d8ff;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      padding: 20px;
+      min-height: 100vh;
+    }
+    .header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 20px 0; border-bottom: 1px solid rgba(77,159,255,0.2); margin-bottom: 30px;
+    }
+    .logo { font-size: 28px; font-weight: 700; letter-spacing: 4px; color: #4d9fff; }
+    .logo span { color: #80b8ff; font-weight: 300; font-size: 14px; letter-spacing: 2px; display: block; }
+    .nav { display: flex; gap: 15px; }
+    .nav a {
+      color: #80b8ff; text-decoration: none; padding: 8px 16px;
+      border: 1px solid rgba(77,159,255,0.3); border-radius: 8px; font-size: 13px;
+      transition: all 0.3s;
+    }
+    .nav a:hover { background: rgba(0,50,120,0.4); border-color: #4d9fff; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 20px; }
+    .card {
+      background: rgba(0,8,25,0.8); border: 1px solid rgba(77,159,255,0.15);
+      border-radius: 12px; padding: 24px; backdrop-filter: blur(10px);
+    }
+    .card h2 { color: #4d9fff; font-size: 16px; margin-bottom: 16px; letter-spacing: 1px; }
+    .metric { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid rgba(77,159,255,0.08); }
+    .metric-label { color: #6090c0; font-size: 13px; }
+    .metric-value { color: #80b8ff; font-weight: 600; font-size: 14px; }
+    .metric-value.good { color: #4dff88; }
+    .metric-value.warn { color: #ffaa44; }
+    .btn {
+      background: rgba(0,50,120,0.5); border: 1px solid rgba(77,159,255,0.4);
+      color: #80b8ff; padding: 10px 20px; border-radius: 8px; font-size: 13px;
+      cursor: pointer; transition: all 0.3s; margin: 5px;
+    }
+    .btn:hover { background: rgba(0,80,200,0.5); border-color: #4d9fff; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn.danger { border-color: rgba(255,80,80,0.4); color: #ff8888; }
+    .btn.danger:hover { background: rgba(200,0,0,0.3); }
+    .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; }
+    .status-dot.online { background: #4dff88; box-shadow: 0 0 8px rgba(77,255,136,0.5); }
+    .status-dot.offline { background: #ff4444; }
+    .status-dot.training { background: #ffaa44; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    #chat-container { display: flex; flex-direction: column; height: 300px; }
+    #chat-messages { flex: 1; overflow-y: auto; padding: 10px 0; font-size: 13px; line-height: 1.6; }
+    .chat-msg { padding: 6px 0; }
+    .chat-msg.user { color: #4d9fff; }
+    .chat-msg.assistant { color: #80b8ff; }
+    #chat-input-row { display: flex; gap: 10px; margin-top: 10px; }
+    #chat-input {
+      flex: 1; padding: 10px; background: rgba(0,20,60,0.6);
+      border: 1px solid rgba(77,159,255,0.2); border-radius: 8px;
+      color: #c0d8ff; font-size: 13px;
+    }
+    #chat-input:focus { outline: none; border-color: rgba(77,159,255,0.5); }
+    #gen-output {
+      background: rgba(0,20,60,0.4); border: 1px solid rgba(77,159,255,0.1);
+      border-radius: 8px; padding: 12px; font-size: 12px; line-height: 1.6;
+      min-height: 80px; max-height: 200px; overflow-y: auto; white-space: pre-wrap;
+      font-family: 'Courier New', monospace; color: #80b8ff;
+    }
+    .actions { padding-top: 12px; }
+    .loading { color: #6090c0; font-style: italic; font-size: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; color: #4d9fff; padding: 8px 0; border-bottom: 1px solid rgba(77,159,255,0.2); }
+    td { padding: 6px 0; border-bottom: 1px solid rgba(77,159,255,0.05); }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo">BILL<span>B-Intelligent Neural Dashboard</span></div>
+    <div class="nav">
+      <a href="/">3D Brain</a>
+      <a href="/dashboard">Dashboard</a>
+      <a href="/health">API Health</a>
+    </div>
+  </div>
+
+  <div class="grid">
+    <!-- Status Card -->
+    <div class="card">
+      <h2>MODEL STATUS</h2>
+      <div class="metric"><span class="metric-label">Status</span><span class="metric-value" id="m-status"><span class="status-dot offline"></span>Loading...</span></div>
+      <div class="metric"><span class="metric-label">Device</span><span class="metric-value" id="m-device">-</span></div>
+      <div class="metric"><span class="metric-label">Parameters</span><span class="metric-value" id="m-params">-</span></div>
+      <div class="metric"><span class="metric-label">Neurons</span><span class="metric-value" id="m-neurons">-</span></div>
+      <div class="metric"><span class="metric-label">Areas</span><span class="metric-value" id="m-areas">-</span></div>
+      <div class="metric"><span class="metric-label">Vocab Size</span><span class="metric-value" id="m-vocab">-</span></div>
+      <div class="metric"><span class="metric-label">Clients</span><span class="metric-value" id="m-clients">-</span></div>
+    </div>
+
+    <!-- Training Card -->
+    <div class="card">
+      <h2>TRAINING</h2>
+      <div class="metric"><span class="metric-label">Training</span><span class="metric-value" id="t-active">-</span></div>
+      <div class="metric"><span class="metric-label">Epoch</span><span class="metric-value" id="t-epoch">-</span></div>
+      <div class="metric"><span class="metric-label">Train BPC</span><span class="metric-value" id="t-bpc">-</span></div>
+      <div class="metric"><span class="metric-label">Test BPC</span><span class="metric-value" id="t-test-bpc">-</span></div>
+      <div class="metric"><span class="metric-label">Train Accuracy</span><span class="metric-value" id="t-acc">-</span></div>
+      <div class="metric"><span class="metric-label">Test Accuracy</span><span class="metric-value" id="t-test-acc">-</span></div>
+      <div class="metric"><span class="metric-label">Learning Rate</span><span class="metric-value" id="t-lr">-</span></div>
+      <div class="metric"><span class="metric-label">Position Drift</span><span class="metric-value" id="t-drift">-</span></div>
+      <div class="actions">
+        <button class="btn" onclick="startTraining()">Train 20 Epochs</button>
+        <button class="btn danger" onclick="stopTraining()">Stop</button>
+      </div>
+    </div>
+
+    <!-- Generation Card -->
+    <div class="card">
+      <h2>TEXT GENERATION</h2>
+      <div id="gen-output">Click "Generate" to create text...</div>
+      <div class="actions">
+        <button class="btn" onclick="generateText()">Generate</button>
+        <button class="btn" onclick="generateText('To be or not')">Shakespeare</button>
+        <button class="btn" onclick="generateText('The king')">The King</button>
+      </div>
+    </div>
+
+    <!-- Chat Card -->
+    <div class="card">
+      <h2>CHAT WITH BILL</h2>
+      <div id="chat-container">
+        <div id="chat-messages"></div>
+        <div id="chat-input-row">
+          <input type="text" id="chat-input" placeholder="Ask Bill something..." onkeydown="if(event.key==='Enter')sendChat()">
+          <button class="btn" onclick="sendChat()">Send</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Benchmark Card -->
+    <div class="card">
+      <h2>BENCHMARKS</h2>
+      <div id="bench-results"><span class="loading">Click "Run Benchmarks" to start...</span></div>
+      <div class="actions">
+        <button class="btn" onclick="runBenchmark()" id="bench-btn">Run Benchmarks</button>
+      </div>
+    </div>
+
+    <!-- Checkpoints Card -->
+    <div class="card">
+      <h2>CHECKPOINTS</h2>
+      <div id="ckpt-list"><span class="loading">Loading...</span></div>
+    </div>
+  </div>
+
+  <script>
+    const API = window.location.origin;
+
+    async function fetchJSON(url) {
+      try {
+        const r = await fetch(API + url);
+        return await r.json();
+      } catch (e) {
+        console.warn('Fetch error:', url, e);
+        return null;
+      }
+    }
+
+    function setEl(id, val) { const el = document.getElementById(id); if (el) el.textContent = val; }
+    function setHTML(id, val) { const el = document.getElementById(id); if (el) el.innerHTML = val; }
+
+    async function refreshStatus() {
+      const h = await fetchJSON('/health');
+      if (!h) {
+        setHTML('m-status', '<span class="status-dot offline"></span>Offline');
+        return;
+      }
+
+      const statusClass = h.training ? 'training' : 'online';
+      const statusText = h.training ? 'Training' : 'Ready';
+      setHTML('m-status', `<span class="status-dot ${statusClass}"></span>${statusText}`);
+      setEl('m-device', h.device);
+      setEl('m-clients', h.clients);
+
+      if (h.metrics) {
+        setEl('t-active', h.training ? 'Active' : 'Idle');
+        if (h.metrics.epoch) setEl('t-epoch', h.metrics.epoch);
+        if (h.metrics.train_bpc) setEl('t-bpc', h.metrics.train_bpc.toFixed(3));
+        if (h.metrics.test_bpc) setEl('t-test-bpc', h.metrics.test_bpc.toFixed(3));
+        if (h.metrics.train_accuracy) setEl('t-acc', (h.metrics.train_accuracy * 100).toFixed(1) + '%');
+        if (h.metrics.test_accuracy) setEl('t-test-acc', (h.metrics.test_accuracy * 100).toFixed(1) + '%');
+        if (h.metrics.lr) setEl('t-lr', h.metrics.lr.toExponential(2));
+        if (h.metrics.positions_drift) setEl('t-drift', h.metrics.positions_drift.toFixed(4));
+      }
+
+      const info = await fetchJSON('/model_info');
+      if (info) {
+        setEl('m-params', info.params.toLocaleString());
+        setEl('m-neurons', info.n_neurons);
+        setEl('m-areas', info.n_areas);
+        setEl('m-vocab', info.vocab_size);
+      }
+    }
+
+    async function startTraining() {
+      const r = await fetchJSON('/train?epochs=20');
+      if (r) setEl('t-active', r.status);
+    }
+
+    async function stopTraining() {
+      await fetchJSON('/stop');
+      setEl('t-active', 'Stopping...');
+    }
+
+    async function generateText(prompt) {
+      prompt = prompt || 'To be or not to be';
+      setHTML('gen-output', '<span class="loading">Generating...</span>');
+      const r = await fetchJSON(`/generate?prompt=${encodeURIComponent(prompt)}&length=300&temperature=0.7`);
+      if (r) {
+        document.getElementById('gen-output').textContent = r.generated;
+      }
+    }
+
+    async function sendChat() {
+      const input = document.getElementById('chat-input');
+      const msg = input.value.trim();
+      if (!msg) return;
+      input.value = '';
+
+      const messages = document.getElementById('chat-messages');
+      messages.innerHTML += `<div class="chat-msg user">You: ${msg}</div>`;
+
+      const r = await fetchJSON(`/chat?message=${encodeURIComponent(msg)}`);
+      if (r) {
+        messages.innerHTML += `<div class="chat-msg assistant">Bill: ${r.assistant}</div>`;
+      }
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    async function runBenchmark() {
+      const btn = document.getElementById('bench-btn');
+      btn.disabled = true;
+      btn.textContent = 'Running...';
+      setHTML('bench-results', '<span class="loading">Running benchmarks...</span>');
+
+      const r = await fetchJSON('/benchmark');
+      btn.disabled = false;
+      btn.textContent = 'Run Benchmarks';
+
+      if (!r) {
+        setHTML('bench-results', '<span class="loading">Benchmark failed</span>');
+        return;
+      }
+
+      let html = '<table>';
+      if (r.summary) {
+        html += `<tr><th colspan="2">Summary</th></tr>`;
+        html += `<tr><td>BPC</td><td>${r.summary.bpc.toFixed(3)}</td></tr>`;
+        html += `<tr><td>Latency</td><td>${r.summary.latency_ms.toFixed(1)} ms</td></tr>`;
+        html += `<tr><td>Generation</td><td>${r.summary.chars_per_sec.toFixed(0)} chars/s</td></tr>`;
+        html += `<tr><td>Parameters</td><td>${r.summary.model_params.toLocaleString()}</td></tr>`;
+      }
+      if (r.bpc) {
+        html += `<tr><th colspan="2">BPC Benchmark</th></tr>`;
+        html += `<tr><td>BPC</td><td>${r.bpc.bpc.toFixed(3)}</td></tr>`;
+        html += `<tr><td>Accuracy</td><td>${(r.bpc.accuracy * 100).toFixed(1)}%</td></tr>`;
+        html += `<tr><td>Efficiency</td><td>${r.bpc.bpc_per_100k_params.toFixed(3)} BPC/100K</td></tr>`;
+      }
+      if (r.latency) {
+        html += `<tr><th colspan="2">Latency</th></tr>`;
+        html += `<tr><td>Mean</td><td>${r.latency.mean_ms.toFixed(2)} ms</td></tr>`;
+        html += `<tr><td>P50</td><td>${r.latency.p50_ms.toFixed(2)} ms</td></tr>`;
+        html += `<tr><td>P99</td><td>${r.latency.p99_ms.toFixed(2)} ms</td></tr>`;
+        html += `<tr><td>Throughput</td><td>${r.latency.throughput_samples_per_sec.toFixed(0)} samples/s</td></tr>`;
+      }
+      html += '</table>';
+      setHTML('bench-results', html);
+    }
+
+    async function loadCheckpoints() {
+      const r = await fetchJSON('/checkpoints');
+      if (!r || !r.checkpoints) {
+        setHTML('ckpt-list', '<span class="loading">No checkpoints found</span>');
+        return;
+      }
+      let html = '<table><tr><th>Tag</th><th>Epoch</th><th>Size</th></tr>';
+      for (const c of r.checkpoints) {
+        const size = c.size_mb ? c.size_mb.toFixed(1) + ' MB' : '-';
+        const epoch = c.epoch || '-';
+        html += `<tr><td>${c.tag}</td><td>${epoch}</td><td>${size}</td></tr>`;
+      }
+      html += '</table>';
+      setHTML('ckpt-list', html);
+    }
+
+    // Auto-refresh
+    refreshStatus();
+    loadCheckpoints();
+    setInterval(refreshStatus, 3000);
+  </script>
+</body>
+</html>
